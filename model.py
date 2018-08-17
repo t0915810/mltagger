@@ -82,6 +82,8 @@ class MLTModel(object):
 
 
     def construct_network(self):
+
+        # These will be populated with tensorflow API 'feed_dict'
         self.word_ids = tf.placeholder(tf.int32, [None, None], name="word_ids")
         self.char_ids = tf.placeholder(tf.int32, [None, None, None], name="char_ids")
         self.sentence_lengths = tf.placeholder(tf.int32, [None], name="sentence_lengths")
@@ -107,40 +109,87 @@ class MLTModel(object):
 
         zeros_initializer = tf.zeros_initializer()
 
-        self.word_embeddings = tf.get_variable("word_embeddings", 
-            shape=[len(self.word2id), self.config["word_embedding_size"]], 
-            initializer=(zeros_initializer if self.config["emb_initial_zero"] == True else self.initializer), 
+        # ---------------------
+        # End of initialization
+        # ---------------------
+
+        '''
+        This is the word embedding preloaded from GloVe, set at size 300, which can be fine-tuned
+        during training, by setting trainable = True in the tensorflow API
+
+          shape = [#unique words, #dim of word embedding] = [?, 300]
+          initializer = self.initializr = tf.glorot_normal_initializer()
+          trainable = True
+
+        '''
+
+        self.word_embeddings = tf.get_variable("word_embeddings",
+            shape=[len(self.word2id), self.config["word_embedding_size"]],
+            initializer=(zeros_initializer if self.config["emb_initial_zero"] == True else self.initializer),
             trainable=(True if self.config["train_embeddings"] == True else False))
+
+        # This provides a way to lookup the word embeddings based on an input list of word indices
+        # tf.nn.embedding_lookup does slicing similar to numpy matrix slicing
+        # (https://stackoverflow.com/questions/34870614/what-does-tf-nn-embedding-lookup-function-do)
         input_tensor = tf.nn.embedding_lookup(self.word_embeddings, self.word_ids)
+        input_tensor = tf.Print(input_tensor, [tf.shape(input_tensor), input_tensor], 'input_tensor: ', summarize = 5)
+        input_tensor = tf.Print(input_tensor, [tf.shape(self.word_embeddings), self.word_embeddings], 'self.word_embeddings: ', summarize = 5)
+        input_tensor = tf.Print(input_tensor, [tf.shape(self.word_ids), self.word_ids], 'self.word_ids: ', summarize = 5)
+
+        # 'word_embedding_size' = 300
         input_vector_size = self.config["word_embedding_size"]
 
+        # 'char_embedding_size' = 100, 'char_recurrent_size' = 100
         if self.config["char_embedding_size"] > 0 and self.config["char_recurrent_size"] > 0:
+
+            # Variables created here will be constrained within the scope 'chars'
+            # instead of being shared globally among multiple tensorflow sessions.
+            # Variables will be named "chars/...", "chars/..."
             with tf.variable_scope("chars"), tf.control_dependencies([tf.assert_equal(tf.shape(self.char_ids)[2], tf.reduce_max(self.word_lengths), message="Char dimensions don't match")]):
-                self.char_embeddings = tf.get_variable("char_embeddings", 
-                    shape=[len(self.char2id), self.config["char_embedding_size"]], 
-                    initializer=self.initializer, 
+
+                # Similar to self.word_embeddings
+                self.char_embeddings = tf.get_variable("char_embeddings",
+                    shape=[len(self.char2id), self.config["char_embedding_size"]],
+                    initializer=self.initializer,
                     trainable=True)
+
+                # Similar to word input_tensor
                 char_input_tensor = tf.nn.embedding_lookup(self.char_embeddings, self.char_ids)
 
+                # Reshape char_input_tensor from 4D [batch size, max # words, max # chars, # unique chars]
+                # into 3D [batch size * max # words, max # chars, # unique chars]
+                # Reason: lstm only accepts 3d vector of [?, ?, ?] = [all words in a batch, up to 14 chars, char embedding = 100]
+                # Values are not affected.
                 s = tf.shape(char_input_tensor)
                 char_input_tensor = tf.reshape(char_input_tensor, shape=[s[0]*s[1], s[2], self.config["char_embedding_size"]])
                 _word_lengths = tf.reshape(self.word_lengths, shape=[s[0]*s[1]])
+                char_input_tensor = tf.Print(char_input_tensor, [tf.shape(char_input_tensor), char_input_tensor], 'char_input_tensor: ', summarize = 5)
 
-                char_lstm_cell_fw = tf.nn.rnn_cell.LSTMCell(self.config["char_recurrent_size"], 
-                    use_peepholes=self.config["lstm_use_peepholes"], 
-                    state_is_tuple=True, 
+                char_lstm_cell_fw = tf.nn.rnn_cell.LSTMCell(self.config["char_recurrent_size"],
+                    use_peepholes=self.config["lstm_use_peepholes"],
+                    state_is_tuple=True,
                     initializer=self.initializer,
                     reuse=False)
-                char_lstm_cell_bw = tf.nn.rnn_cell.LSTMCell(self.config["char_recurrent_size"], 
-                    use_peepholes=self.config["lstm_use_peepholes"], 
-                    state_is_tuple=True, 
+                char_lstm_cell_bw = tf.nn.rnn_cell.LSTMCell(self.config["char_recurrent_size"],
+                    use_peepholes=self.config["lstm_use_peepholes"],
+                    state_is_tuple=True,
                     initializer=self.initializer,
                     reuse=False)
 
                 char_lstm_outputs = tf.nn.bidirectional_dynamic_rnn(char_lstm_cell_fw, char_lstm_cell_bw, char_input_tensor, sequence_length=_word_lengths, dtype=tf.float32, time_major=False)
+
+                # Seems like only char_output_fw and char_output_bw are important
                 _, ((_, char_output_fw), (_, char_output_bw)) = char_lstm_outputs
+                char_output_fw = tf.Print(char_output_fw, [tf.shape(char_output_fw), char_output_fw], 'char_output_fw: ', summarize = 5)
+                char_output_bw = tf.Print(char_output_bw, [tf.shape(char_output_bw), char_output_bw], 'char_output_bw: ', summarize = 5)
+
+
                 char_output_tensor = tf.concat([char_output_fw, char_output_bw], axis=-1)
+                char_output_tensor = tf.Print(char_output_tensor, [tf.shape(char_output_tensor), char_output_tensor], 'char_output_tensor: ', summarize = 5)
+
                 char_output_tensor = tf.reshape(char_output_tensor, shape=[s[0], s[1], 2 * self.config["char_recurrent_size"]])
+                char_output_tensor = tf.Print(char_output_tensor, [tf.shape(char_output_tensor), char_output_tensor], 'char_output_tensor: ', summarize = 5)
+
                 char_output_vector_size = 2 * self.config["char_recurrent_size"]
 
                 if self.config["lmcost_char_gamma"] > 0.0:
@@ -148,13 +197,25 @@ class MLTModel(object):
                 if self.config["lmcost_joint_char_gamma"] > 0.0:
                     self.loss += self.config["lmcost_joint_char_gamma"] * self.construct_lmcost(char_output_tensor, char_output_tensor, self.sentence_lengths, self.word_ids, "joint", "lmcost_char_joint")
 
+                # 'char_hidden_layer_size' = 50
+                # 'char_integration_method' = 'concat'
                 if self.config["char_hidden_layer_size"] > 0:
+
+                    # input = char_output_tensor
+                    # output dim = char_hidden_layer_size
                     char_output_tensor = tf.layers.dense(char_output_tensor, self.config["char_hidden_layer_size"], activation=tf.tanh, kernel_initializer=self.initializer)
+                    char_output_tensor = tf.Print(char_output_tensor, [tf.shape(char_output_tensor), char_output_tensor], 'char_output_tensor: ', summarize = 5)
+
                     char_output_vector_size = self.config["char_hidden_layer_size"]
 
                 if self.config["char_integration_method"] == "concat":
+
+                    # combines character and word embeddings by concatenation
                     input_tensor = tf.concat([input_tensor, char_output_tensor], axis=-1)
+                    input_tensor = tf.Print(input_tensor, [tf.shape(input_tensor), input_tensor], '--Concat word and char tensors--\ninput_tensor: ', summarize = 5)
+
                     input_vector_size += char_output_vector_size
+
                 elif self.config["char_integration_method"] == "none":
                     input_tensor = input_tensor
                 else:
@@ -162,28 +223,39 @@ class MLTModel(object):
 
         self.word_representations = input_tensor
 
+        # Controls dropout probability
+        # dropout_input = 0.5
         dropout_input = self.config["dropout_input"] * tf.cast(self.is_training, tf.float32) + (1.0 - tf.cast(self.is_training, tf.float32))
-        input_tensor =  tf.nn.dropout(input_tensor, dropout_input, name="dropout_word")
+        dropout_input = tf.Print(dropout_input, [tf.shape(dropout_input), dropout_input], 'dropout_input: ', summarize = 5)
 
-        word_lstm_cell_fw = tf.nn.rnn_cell.LSTMCell(self.config["word_recurrent_size"], 
-            use_peepholes=self.config["lstm_use_peepholes"], 
-            state_is_tuple=True, 
+        input_tensor =  tf.nn.dropout(input_tensor, dropout_input, name="dropout_word")
+        input_tensor = tf.Print(input_tensor, [tf.shape(input_tensor), input_tensor], '--Apply dropout--\ninput_tensor: ', summarize = 5)
+
+        word_lstm_cell_fw = tf.nn.rnn_cell.LSTMCell(self.config["word_recurrent_size"],
+            use_peepholes=self.config["lstm_use_peepholes"],
+            state_is_tuple=True,
             initializer=self.initializer,
             reuse=False)
-        word_lstm_cell_bw = tf.nn.rnn_cell.LSTMCell(self.config["word_recurrent_size"], 
-            use_peepholes=self.config["lstm_use_peepholes"], 
-            state_is_tuple=True, 
+        word_lstm_cell_bw = tf.nn.rnn_cell.LSTMCell(self.config["word_recurrent_size"],
+            use_peepholes=self.config["lstm_use_peepholes"],
+            state_is_tuple=True,
             initializer=self.initializer,
             reuse=False)
 
         with tf.control_dependencies([tf.assert_equal(tf.shape(self.word_ids)[1], tf.reduce_max(self.sentence_lengths), message="Sentence dimensions don't match")]):
             (lstm_outputs_fw, lstm_outputs_bw), ((_, lstm_output_fw), (_, lstm_output_bw)) = tf.nn.bidirectional_dynamic_rnn(word_lstm_cell_fw, word_lstm_cell_bw, input_tensor, sequence_length=self.sentence_lengths, dtype=tf.float32, time_major=False)
 
+        # Controls dropout probability
+        # dropout_word_lstm = 0.5
         dropout_word_lstm = self.config["dropout_word_lstm"] * tf.cast(self.is_training, tf.float32) + (1.0 - tf.cast(self.is_training, tf.float32))
+        dropout_word_lstm = tf.Print(dropout_word_lstm, [tf.shape(dropout_word_lstm), dropout_word_lstm], 'dropout_word_lstm: ', summarize = 5)
+
+        # Print output of bidirectional lstm
         lstm_outputs_fw =  tf.nn.dropout(lstm_outputs_fw, dropout_word_lstm, noise_shape=tf.convert_to_tensor([tf.shape(self.word_ids)[0],1,self.config["word_recurrent_size"]], dtype=tf.int32))
         lstm_outputs_bw =  tf.nn.dropout(lstm_outputs_bw, dropout_word_lstm, noise_shape=tf.convert_to_tensor([tf.shape(self.word_ids)[0],1,self.config["word_recurrent_size"]], dtype=tf.int32))
         lstm_outputs = tf.concat([lstm_outputs_fw, lstm_outputs_bw], -1)
 
+        # Undocumented
         if self.config["whidden_layer_size"] > 0:
             lstm_outputs = tf.layers.dense(lstm_outputs, self.config["whidden_layer_size"], activation=tf.tanh, kernel_initializer=self.initializer)
 
@@ -235,18 +307,18 @@ class MLTModel(object):
                     self.sentence_objective_weights *tf.square(
                         tf.reduce_max(
                             tf.where(
-                                tf.sequence_mask(self.sentence_lengths), 
-                                self.attention_weights_unnormalised, 
-                                tf.zeros_like(self.attention_weights_unnormalised) - 1e6), 
+                                tf.sequence_mask(self.sentence_lengths),
+                                self.attention_weights_unnormalised,
+                                tf.zeros_like(self.attention_weights_unnormalised) - 1e6),
                             axis=-1) - self.sentence_labels))
-                + 
+                +
                 tf.reduce_sum(
                     self.sentence_objective_weights * tf.square(
                         tf.reduce_min(
                             tf.where(
-                                tf.sequence_mask(self.sentence_lengths), 
-                                self.attention_weights_unnormalised, 
-                                tf.zeros_like(self.attention_weights_unnormalised) + 1e6), 
+                                tf.sequence_mask(self.sentence_lengths),
+                                self.attention_weights_unnormalised,
+                                tf.zeros_like(self.attention_weights_unnormalised) + 1e6),
                             axis=-1) - 0.0)))
 
         self.token_scores = [tf.where(tf.sequence_mask(self.sentence_lengths), self.attention_weights_unnormalised, tf.zeros_like(self.attention_weights_unnormalised) - 1e6)]
@@ -377,7 +449,7 @@ class MLTModel(object):
                 word_lengths[i][j] = len(batch[i][j][0])
                 for k in range(min(len(batch[i][j][0]), max_word_length)):
                     char_ids[i][j][k] = self.translate2id(batch[i][j][0][k], self.char2id, self.CUNK)
-                
+
                 if len(batch[i][j]) == 2 or (len(batch[i][j]) >= 3 and batch[i][j][1] == "T"):
                     word_objective_weights[i][j] = 1.0
             if len(batch[i][j]) == 2 or (len(batch[i][j]) >= 3 and batch[i][0][1] == "S") or self.config["sentence_objective_persistent"] == True:
@@ -476,4 +548,3 @@ class MLTModel(object):
                 assert(variable.shape == dump["params"][variable.name].shape), "Variable shape not as expected: " + str(variable.name) + " " + str(variable.shape) + " " + str(dump["params"][variable.name].shape)
                 value = numpy.asarray(dump["params"][variable.name])
                 self.session.run(variable.assign(value))
-
