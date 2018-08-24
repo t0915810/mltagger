@@ -331,6 +331,8 @@ class MLTModel(object):
 
         self.train_op = self.construct_optimizer(self.config["opt_strategy"], self.loss, self.learningrate, self.config["clip"])
 
+        # For tensorboard summary
+        tf.summary.scalar('self.loss', self.loss)
 
 
     def construct_lmcost(self, input_tensor_fw, input_tensor_bw, sentence_lengths, target_ids, lmcost_type, name):
@@ -385,7 +387,7 @@ class MLTModel(object):
     def preload_word_embeddings(self, embedding_path):
         loaded_embeddings = set()
         embedding_matrix = self.session.run(self.word_embeddings)
-        with open(embedding_path, 'r') as f:
+        with open(embedding_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line_parts = line.strip().split()
                 if len(line_parts) <= 2:
@@ -460,6 +462,11 @@ class MLTModel(object):
 
 
     def process_batch(self, batch, is_training, learningrate):
+
+        # For tensorboard visualisation
+        merged = tf.summary.merge_all()
+        writer = tf.summary.FileWriter('./logs/', self.session.graph)
+
         feed_dict = self.create_input_dictionary_for_batch(batch, is_training, learningrate)
         cost, sentence_scores, token_scores = self.session.run([self.loss, self.sentence_scores, self.token_scores] + ([self.train_op] if is_training == True else []), feed_dict=feed_dict)[:3]
         return cost, sentence_scores, token_scores

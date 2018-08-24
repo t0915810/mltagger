@@ -144,6 +144,7 @@ def process_sentences(data, model, is_training, learningrate, config, name):
 
 
 def run_experiment(config_path):
+
     config = parse_config("config", config_path)
     temp_model_path = config_path + ".model"
     if "random_seed" in config:
@@ -192,7 +193,7 @@ def run_experiment(config_path):
                 if math.isnan(results_dev["dev_cost_sum"]) or math.isinf(results_dev["dev_cost_sum"]):
                     raise ValueError("Cost is NaN or Inf. Exiting.")
 
-                if (epoch == 0 or (model_selector_type == "high" and results_dev[model_selector] > best_selector_value) 
+                if (epoch == 0 or (model_selector_type == "high" and results_dev[model_selector] > best_selector_value)
                                or (model_selector_type == "low" and results_dev[model_selector] < best_selector_value)):
                     best_epoch = epoch
                     best_selector_value = results_dev[model_selector]
@@ -228,4 +229,3 @@ def run_experiment(config_path):
 
 if __name__ == "__main__":
     run_experiment(sys.argv[1])
-
